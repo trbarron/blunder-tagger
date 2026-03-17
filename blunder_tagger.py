@@ -35,6 +35,8 @@ MIN_PLIES = 60
 MAX_PLIES = 80
 MIN_BLUNDERS = 3
 MAX_BLUNDERS = 6
+MAX_GAMES = 730  # 2 years of daily puzzles
+MAX_ELO = 1500
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -92,20 +94,24 @@ def process_pgn(
     output_file: str,
     white_only: bool = False,
     black_only: bool = False,
-    threshold: float = BLUNDER_THRESHOLD_WC
+    threshold: float = BLUNDER_THRESHOLD_WC,
+    max_games: int = MAX_GAMES,
+    max_elo: int = MAX_ELO,
 ) -> int:
     """Process PGN file(s) and find games matching criteria."""
     pgn_files = list(pgn_path.glob("*.pgn")) if pgn_path.is_dir() else [pgn_path]
     found_count = 0
     today = date.today().isoformat()
     
-    # Determine starting ID based on existing records
+    # Determine starting ID and existing count based on existing records
     current_id_num = 1
+    existing_count = 0
     if os.path.exists(output_file):
         try:
             with open(output_file, "r") as f:
                 data = json.load(f)
                 if data and isinstance(data, list):
+                    existing_count = len(data)
                     last_id = data[-1].get("gameId", "bw-000")
                     if last_id.startswith("bw-"):
                         try:
@@ -114,6 +120,10 @@ def process_pgn(
                             pass
         except:
             pass
+
+    if existing_count >= max_games:
+        print(f"Already have {existing_count} games (limit: {max_games}). Nothing to do.")
+        return 0
 
     for p_file in pgn_files:
         print(f"Reading {p_file}...")
@@ -137,6 +147,15 @@ def process_pgn(
                 # Check board after all moves
                 board_at_end = game.end().board()
                 if not board_at_end.is_checkmate():
+                    continue
+
+                # Filter 4: Both players below max ELO
+                try:
+                    w_elo = int(game.headers.get("WhiteElo", 0))
+                    b_elo = int(game.headers.get("BlackElo", 0))
+                except (TypeError, ValueError):
+                    w_elo, b_elo = 0, 0
+                if max(w_elo, b_elo) >= max_elo:
                     continue
                 
                 print(f"Analyzing potential game: {game.headers.get('White')} vs {game.headers.get('Black')} ({ply_count} plies)...")
@@ -208,16 +227,6 @@ def process_pgn(
                 # Filter 4: 3-6 blunders total
                 blunder_count = len(blunder_indices)
                 if MIN_BLUNDERS <= blunder_count <= MAX_BLUNDERS:
-                    # Get Elos safely
-                    try:
-                        w_elo = int(game.headers.get("WhiteElo", 0))
-                    except (TypeError, ValueError):
-                        w_elo = 0
-                    try:
-                        b_elo = int(game.headers.get("BlackElo", 0))
-                    except (TypeError, ValueError):
-                        b_elo = 0
-                        
                     record = {
                         "gameId": f"bw-{current_id_num:03d}",
                         "date": today,
@@ -233,6 +242,9 @@ def process_pgn(
                     print(f"  ✓ Found and saved: {record['gameId']} ({blunder_count} blunders)")
                     current_id_num += 1
                     found_count += 1
+                    if existing_count + found_count >= max_games:
+                        print(f"\nReached game limit ({max_games}). Stopping.")
+                        return found_count
                 else:
                     print(f"  × Skipped: {blunder_count} blunders (range: {MIN_BLUNDERS}-{MAX_BLUNDERS})")
                     
@@ -248,6 +260,8 @@ def main():
     parser.add_argument("--white-only", action="store_true", help="Only count White's blunders")
     parser.add_argument("--black-only", action="store_true", help="Only count Black's blunders")
     parser.add_argument("--threshold", type=float, default=BLUNDER_THRESHOLD_WC, help=f"Blunder threshold in WC loss (default: {BLUNDER_THRESHOLD_WC})")
+    parser.add_argument("--max-games", type=int, default=MAX_GAMES, help=f"Stop after this many total games in output (default: {MAX_GAMES})")
+    parser.add_argument("--max-elo", type=int, default=MAX_ELO, help=f"Skip games where either player is at or above this Elo (default: {MAX_ELO})")
     args = parser.parse_args()
     
     stockfish_path = args.stockfish or find_stockfish()
@@ -271,14 +285,16 @@ def main():
     try:
         with chess.engine.SimpleEngine.popen_uci(stockfish_path) as engine:
             count = process_pgn(
-                input_path, 
-                engine, 
-                args.depth, 
-                args.user, 
+                input_path,
+                engine,
+                args.depth,
+                args.user,
                 args.output,
                 white_only=args.white_only,
                 black_only=args.black_only,
-                threshold=args.threshold
+                threshold=args.threshold,
+                max_games=args.max_games,
+                max_elo=args.max_elo,
             )
     except Exception as e:
         print(f"Error during execution: {e}")
